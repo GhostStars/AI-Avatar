@@ -534,7 +534,7 @@ function alipayTimestamp(date = new Date()) {
 
 function alipaySignContent(params) {
   return Object.keys(params)
-    .filter((key) => key !== "sign" && key !== "sign_type" && params[key] !== undefined && params[key] !== "")
+    .filter((key) => key !== "sign" && params[key] !== undefined && params[key] !== "")
     .sort()
     .map((key) => `${key}=${params[key]}`)
     .join("&");
