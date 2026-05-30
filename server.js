@@ -422,7 +422,7 @@ async function handleAlipayCreate(req, res) {
   const params = {
     app_id: process.env.ALIPAY_APP_ID,
     method: "alipay.trade.page.pay",
-    charset: "utf-8",
+    charset: "UTF-8",
     sign_type: "RSA2",
     timestamp: alipayTimestamp(),
     version: "1.0",
@@ -560,7 +560,7 @@ function buildAutoSubmitForm(action, params) {
   const inputs = Object.entries(params)
     .map(([key, value]) => `<input type="hidden" name="${escapeHtml(key)}" value="${escapeHtml(value)}">`)
     .join("");
-  return `<!doctype html><html><head><meta charset="utf-8"><title>跳转支付宝</title></head><body><form id="alipaySubmit" method="post" action="${escapeHtml(action)}">${inputs}</form><script>document.getElementById('alipaySubmit').submit();</script></body></html>`;
+  return `<!doctype html><html><head><meta charset="UTF-8"><title>跳转支付宝</title></head><body><form id="alipaySubmit" method="post" accept-charset="UTF-8" action="${escapeHtml(action)}">${inputs}</form><script>document.getElementById('alipaySubmit').submit();</script></body></html>`;
 }
 
 function escapeHtml(value) {
