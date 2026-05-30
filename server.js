@@ -557,10 +557,12 @@ function verifyAlipay(params) {
 }
 
 function buildAutoSubmitForm(action, params) {
-  const inputs = Object.entries(params)
-    .map(([key, value]) => `<input type="hidden" name="${escapeHtml(key)}" value="${escapeHtml(value)}">`)
-    .join("");
-  return `<!doctype html><html><head><meta charset="UTF-8"><title>跳转支付宝</title></head><body><form id="alipaySubmit" method="post" accept-charset="UTF-8" action="${escapeHtml(action)}">${inputs}</form><script>document.getElementById('alipaySubmit').submit();</script></body></html>`;
+  const query = new URLSearchParams();
+  for (const [key, value] of Object.entries(params)) {
+    query.set(key, String(value));
+  }
+  const paymentUrl = `${action}?${query.toString()}`;
+  return `<!doctype html><html><head><meta charset="UTF-8"><title>跳转支付宝</title></head><body><script>location.replace(${JSON.stringify(paymentUrl)});</script></body></html>`;
 }
 
 function escapeHtml(value) {
