@@ -540,6 +540,14 @@ function alipaySignContent(params) {
     .join("&");
 }
 
+function alipayNotifySignContent(params) {
+  return Object.keys(params)
+    .filter((key) => key !== "sign" && key !== "sign_type" && params[key] !== undefined && params[key] !== "")
+    .sort()
+    .map((key) => `${key}=${params[key]}`)
+    .join("&");
+}
+
 function signAlipay(params) {
   return crypto.createSign("RSA-SHA256").update(alipaySignContent(params), "utf8").sign(normalizePrivateKey(process.env.ALIPAY_PRIVATE_KEY), "base64");
 }
@@ -549,7 +557,7 @@ function verifyAlipay(params) {
   try {
     return crypto
       .createVerify("RSA-SHA256")
-      .update(alipaySignContent(params), "utf8")
+      .update(alipayNotifySignContent(params), "utf8")
       .verify(normalizePublicKey(process.env.ALIPAY_PUBLIC_KEY), params.sign, "base64");
   } catch {
     return false;
