@@ -75,6 +75,10 @@ const server = http.createServer(async (req, res) => {
       await handleAlipayNotify(req, res);
       return;
     }
+    if (req.method === "POST" && req.url === "/api/payment/alipay/sync") {
+      await handleAlipaySync(req, res);
+      return;
+    }
     if (req.method === "POST" && req.url === "/api/generate/text-avatar") {
       await handleTextAvatar(req, res);
       return;
@@ -463,28 +467,90 @@ async function handleAlipayNotify(req, res) {
     res.end("failure");
     return;
   }
-  if ((tradeStatus === "TRADE_SUCCESS" || tradeStatus === "TRADE_FINISHED") && order.status !== "paid") {
-    order.status = "paid";
-    order.paymentTradeNo = tradeNo;
-    order.paidAt = now();
-    order.updatedAt = now();
-    const account = accountFor(db, order.userId);
-    account.balance += order.points;
-    account.totalRecharged += order.points;
-    account.updatedAt = now();
-    db.pointTransactions.unshift({
-      id: id("pt"),
-      userId: order.userId,
-      type: "recharge",
-      points: order.points,
-      relatedOrderId: order.id,
-      description: `支付宝充值到账：${order.points} 点`,
-      createdAt: now(),
-    });
+  if (isPaidAlipayStatus(tradeStatus)) {
+    markAlipayOrderPaid(db, order, tradeNo);
     writeDb(db);
   }
   res.writeHead(200, { "content-type": "text/plain; charset=utf-8" });
   res.end("success");
+}
+
+async function handleAlipaySync(req, res) {
+  assertAlipayConfig();
+  const body = await readJson(req);
+  const outTradeNo = String(body.outTradeNo || body.out_trade_no || "").trim();
+  const tradeNo = String(body.tradeNo || body.trade_no || "").trim();
+  if (!outTradeNo && !tradeNo) throw new HttpError(400, "缺少支付宝订单号。");
+
+  const db = readDb();
+  const user = getSessionUser(req, db);
+  if (!user) throw new HttpError(401, "请先登录后再同步订单。");
+
+  const query = await queryAlipayTrade({ outTradeNo, tradeNo });
+  if (query.code !== "10000") throw new HttpError(400, query.sub_msg || query.msg || "支付宝查单失败。");
+  if (!isPaidAlipayStatus(query.trade_status)) throw new HttpError(400, "支付宝交易还不是支付成功状态。");
+
+  const paidTradeNo = query.trade_no || tradeNo;
+  const paidOutTradeNo = query.out_trade_no || outTradeNo;
+  const totalAmount = Number(query.total_amount);
+  let order = db.orders.find((item) => item.id === paidOutTradeNo || item.paymentTradeNo === paidTradeNo);
+
+  if (!order) {
+    const pkg = packageByAmount(totalAmount);
+    if (!pkg) throw new HttpError(400, "已支付金额和当前点数套餐不匹配，无法自动补单。");
+    order = {
+      id: paidOutTradeNo || id("order"),
+      userId: user.id,
+      packageId: pkg.id,
+      amount: pkg.amount,
+      points: pkg.points,
+      status: "pending",
+      paymentProvider: "alipay",
+      createdAt: now(),
+      updatedAt: now(),
+      recovered: true,
+    };
+    db.orders.unshift(order);
+  }
+
+  if (order.userId !== user.id) throw new HttpError(403, "这笔订单不属于当前登录账户。");
+  if (Number((order.amount / 100).toFixed(2)) !== totalAmount) throw new HttpError(400, "订单金额和支付宝支付金额不一致。");
+
+  markAlipayOrderPaid(db, order, paidTradeNo);
+  writeDb(db);
+  sendJson(res, 200, mePayload(db, user));
+}
+
+function isPaidAlipayStatus(status) {
+  return status === "TRADE_SUCCESS" || status === "TRADE_FINISHED";
+}
+
+function markAlipayOrderPaid(db, order, tradeNo) {
+  if (order.status === "paid") return;
+  order.status = "paid";
+  order.paymentTradeNo = tradeNo;
+  order.paidAt = now();
+  order.updatedAt = now();
+  const account = accountFor(db, order.userId);
+  account.balance += order.points;
+  account.totalRecharged += order.points;
+  account.updatedAt = now();
+  db.pointTransactions.unshift({
+    id: id("pt"),
+    userId: order.userId,
+    type: "recharge",
+    points: order.points,
+    relatedOrderId: order.id,
+    description: `支付宝充值到账：${order.points} 点`,
+    createdAt: now(),
+  });
+}
+
+function packageByAmount(totalAmount) {
+  const cents = Math.round(Number(totalAmount) * 100);
+  const entry = Object.entries(pointPackages).find(([, pkg]) => pkg.amount === cents);
+  if (!entry) return null;
+  return { id: entry[0], ...entry[1] };
 }
 
 function serveStatic(req, res) {
@@ -550,6 +616,28 @@ function alipayNotifySignContent(params) {
 
 function signAlipay(params) {
   return crypto.createSign("RSA-SHA256").update(alipaySignContent(params), "utf8").sign(normalizePrivateKey(process.env.ALIPAY_PRIVATE_KEY), "base64");
+}
+
+async function queryAlipayTrade({ outTradeNo, tradeNo }) {
+  const bizContent = {};
+  if (outTradeNo) bizContent.out_trade_no = outTradeNo;
+  if (tradeNo) bizContent.trade_no = tradeNo;
+  const params = {
+    app_id: process.env.ALIPAY_APP_ID,
+    method: "alipay.trade.query",
+    charset: "UTF-8",
+    sign_type: "RSA2",
+    timestamp: alipayTimestamp(),
+    version: "1.0",
+    biz_content: JSON.stringify(bizContent),
+  };
+  params.sign = signAlipay(params);
+
+  const query = new URLSearchParams();
+  for (const [key, value] of Object.entries(params)) query.set(key, String(value));
+  const response = await fetch(`${process.env.ALIPAY_GATEWAY || "https://openapi.alipay.com/gateway.do"}?${query.toString()}`);
+  const data = await response.json();
+  return data.alipay_trade_query_response || {};
 }
 
 function verifyAlipay(params) {

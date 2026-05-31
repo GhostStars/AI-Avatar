@@ -58,6 +58,7 @@ let formState = {
   authorized: false,
 };
 let loadingTimer = null;
+let paymentSyncPromise = null;
 
 const loadingLines = [
   "正在把提示词拆成可见元素：脸、光、衣服、背景。",
@@ -91,6 +92,37 @@ async function refreshMe() {
     serverMe = null;
     return null;
   }
+}
+
+async function syncPaymentReturn() {
+  if (paymentSyncPromise || location.protocol === "file:") return paymentSyncPromise;
+  const params = new URLSearchParams(location.search);
+  const outTradeNo = params.get("out_trade_no");
+  const tradeNo = params.get("trade_no");
+  if (!outTradeNo && !tradeNo) return null;
+  const syncKey = `alipay-sync:${outTradeNo || tradeNo}`;
+  if (sessionStorage.getItem(syncKey) === "done") return null;
+
+  paymentSyncPromise = api("/api/payment/alipay/sync", {
+    method: "POST",
+    body: JSON.stringify({ outTradeNo, tradeNo }),
+  })
+    .then((data) => {
+      serverMe = data;
+      sessionStorage.setItem(syncKey, "done");
+      const cleanUrl = `${location.origin}${location.pathname}${location.hash || "#/points"}`;
+      history.replaceState(null, "", cleanUrl);
+      toast("支付已确认，点数已到账。");
+      return data;
+    })
+    .catch((error) => {
+      toast(error.message);
+      throw error;
+    })
+    .finally(() => {
+      paymentSyncPromise = null;
+    });
+  return paymentSyncPromise;
 }
 
 function showFatal(error) {
@@ -998,6 +1030,9 @@ function toast(message) {
 async function render() {
   state = loadState();
   await refreshMe();
+  if (location.search.includes("trade_no") || location.search.includes("out_trade_no")) {
+    await syncPaymentReturn().catch(() => {});
+  }
   const [route, arg] = location.hash.replace(/^#\//, "").split("/");
   if (!route) return homePage();
   if (route === "text") return textPage();
