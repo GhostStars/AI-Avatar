@@ -389,9 +389,12 @@ async function sendDypnsSmsCode(phone, purpose) {
   const templateCode = purpose === "set_password" && process.env.ALIYUN_DYPNS_SET_PASSWORD_TEMPLATE_CODE
     ? process.env.ALIYUN_DYPNS_SET_PASSWORD_TEMPLATE_CODE
     : (process.env.ALIYUN_DYPNS_TEMPLATE_CODE || process.env.ALIYUN_SMS_TEMPLATE_CODE || "100001");
-  if (!accessKeyId || !accessKeySecret || !signName || !templateCode) {
-    throw new HttpError(400, "阿里云号码认证配置缺失。需要 AccessKey、赠送签名、赠送模板 Code。");
-  }
+  const missing = [];
+  if (!accessKeyId) missing.push("ALIYUN_DYPNS_ACCESS_KEY_ID");
+  if (!accessKeySecret) missing.push("ALIYUN_DYPNS_ACCESS_KEY_SECRET");
+  if (!signName) missing.push("ALIYUN_DYPNS_SIGN_NAME");
+  if (!templateCode) missing.push("ALIYUN_DYPNS_TEMPLATE_CODE");
+  if (missing.length) throw new HttpError(400, `阿里云号码认证配置缺失：${missing.join(", ")}`);
 
   const outId = id("smsout");
   const params = {
