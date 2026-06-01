@@ -998,7 +998,7 @@ async function requestSmsCode(phoneSelector, hintSelector, purpose) {
     });
     const hint = document.querySelector(hintSelector);
     hint.hidden = false;
-    hint.textContent = `MVP mock 验证码：${data.devCode}`;
+    hint.textContent = data.devCode ? `本地 mock 验证码：${data.devCode}` : (data.message || "验证码已发送。");
   } catch (error) {
     toast(error.message);
   }

@@ -25,6 +25,10 @@ const pointPackages = {
   points_399: { amount: 3990, points: 200, name: "高级包" },
 };
 
+const smsCodeTtlMs = Number(process.env.SMS_CODE_TTL_SECONDS || 600) * 1000;
+const smsSendCooldownMs = Number(process.env.SMS_SEND_COOLDOWN_SECONDS || 60) * 1000;
+const smsHourlyLimit = Number(process.env.SMS_HOURLY_LIMIT || 5);
+
 class HttpError extends Error {
   constructor(status, message) {
     super(message);
@@ -276,23 +280,45 @@ async function handleAuthCode(req, res) {
   const body = await readJson(req);
   const phone = assertPhone(body.phone);
   const db = readDb();
+  assertSmsRateLimit(db, phone);
   const code = String(100000 + crypto.randomInt(900000));
-  db.smsCodes = db.smsCodes.filter((item) => item.phone !== phone || new Date(item.expiresAt) > new Date());
-  db.smsCodes.push({
+  const smsResult = await sendSmsCode(phone, code, body.purpose || "login");
+  db.smsCodes = db.smsCodes.filter((item) => new Date(item.expiresAt) > new Date() && !item.used);
+  const record = {
     id: id("sms"),
     phone,
     code,
     purpose: body.purpose || "login",
     used: false,
     createdAt: now(),
-    expiresAt: new Date(Date.now() + 1000 * 60 * 10).toISOString(),
-  });
+    expiresAt: new Date(Date.now() + smsCodeTtlMs).toISOString(),
+    provider: smsResult.provider,
+    bizId: smsResult.bizId || "",
+  };
+  db.smsCodes.push(record);
   writeDb(db);
-  sendJson(res, 200, {
+  const payload = {
     ok: true,
-    message: "验证码已生成。MVP 暂未接短信服务，先在页面显示验证码。",
-    devCode: code,
-  });
+    message: smsResult.provider === "mock" ? "验证码已生成。当前为本地 mock 模式。" : "验证码已发送，请查看手机短信。",
+  };
+  if (smsResult.provider === "mock") payload.devCode = code;
+  sendJson(res, 200, payload);
+}
+
+function assertSmsRateLimit(db, phone) {
+  const records = db.smsCodes.filter((item) => item.phone === phone);
+  const latest = records
+    .map((item) => new Date(item.createdAt).getTime())
+    .filter(Boolean)
+    .sort((a, b) => b - a)[0];
+  if (latest && Date.now() - latest < smsSendCooldownMs) {
+    throw new HttpError(429, "验证码发送太频繁，稍等一分钟。");
+  }
+  const oneHourAgo = Date.now() - 60 * 60 * 1000;
+  const hourlyCount = records.filter((item) => new Date(item.createdAt).getTime() > oneHourAgo).length;
+  if (hourlyCount >= smsHourlyLimit) {
+    throw new HttpError(429, "验证码发送次数过多，一小时后再试。");
+  }
 }
 
 function verifySmsCode(db, phone, code) {
@@ -302,6 +328,45 @@ function verifySmsCode(db, phone, code) {
   if (!record) throw new HttpError(400, "验证码错误或已过期。");
   record.used = true;
   record.usedAt = now();
+}
+
+async function sendSmsCode(phone, code, purpose) {
+  const provider = (process.env.SMS_PROVIDER || "mock").toLowerCase();
+  if (provider === "mock") return { provider: "mock" };
+  if (provider === "aliyun") return sendAliyunSmsCode(phone, code, purpose);
+  throw new HttpError(400, `未知短信服务商：${provider}`);
+}
+
+async function sendAliyunSmsCode(phone, code, purpose) {
+  const accessKeyId = process.env.ALIYUN_SMS_ACCESS_KEY_ID;
+  const accessKeySecret = process.env.ALIYUN_SMS_ACCESS_KEY_SECRET;
+  const signName = process.env.ALIYUN_SMS_SIGN_NAME;
+  const templateCode = purpose === "set_password" && process.env.ALIYUN_SMS_SET_PASSWORD_TEMPLATE_CODE
+    ? process.env.ALIYUN_SMS_SET_PASSWORD_TEMPLATE_CODE
+    : process.env.ALIYUN_SMS_TEMPLATE_CODE;
+  if (!accessKeyId || !accessKeySecret || !signName || !templateCode) {
+    throw new HttpError(400, "阿里云短信配置缺失。需要 ALIYUN_SMS_ACCESS_KEY_ID / ALIYUN_SMS_ACCESS_KEY_SECRET / ALIYUN_SMS_SIGN_NAME / ALIYUN_SMS_TEMPLATE_CODE。");
+  }
+
+  const endpoint = process.env.ALIYUN_SMS_ENDPOINT || "dysmsapi.aliyuncs.com";
+  const params = {
+    PhoneNumbers: phone,
+    SignName: signName,
+    TemplateCode: templateCode,
+    TemplateParam: JSON.stringify({ code }),
+  };
+  const result = await aliyunOpenApiRequest({
+    endpoint,
+    action: "SendSms",
+    version: "2017-05-25",
+    params,
+    accessKeyId,
+    accessKeySecret,
+  });
+  if (result.Code !== "OK") {
+    throw new HttpError(502, result.Message || `阿里云短信发送失败：${result.Code || "Unknown"}`);
+  }
+  return { provider: "aliyun", bizId: result.BizId };
 }
 
 async function handleLoginCode(req, res) {
@@ -638,6 +703,50 @@ async function queryAlipayTrade({ outTradeNo, tradeNo }) {
   const response = await fetch(`${process.env.ALIPAY_GATEWAY || "https://openapi.alipay.com/gateway.do"}?${query.toString()}`);
   const data = await response.json();
   return data.alipay_trade_query_response || {};
+}
+
+async function aliyunOpenApiRequest({ endpoint, action, version, params, accessKeyId, accessKeySecret }) {
+  const body = "";
+  const contentHash = sha256Hex(body);
+  const headers = {
+    host: endpoint,
+    "x-acs-action": action,
+    "x-acs-content-sha256": contentHash,
+    "x-acs-date": new Date().toISOString().replace(/\.\d{3}Z$/, "Z"),
+    "x-acs-signature-nonce": crypto.randomBytes(16).toString("hex"),
+    "x-acs-version": version,
+  };
+  const signedHeaders = Object.keys(headers).sort().join(";");
+  const canonicalHeaders = Object.keys(headers)
+    .sort()
+    .map((key) => `${key}:${String(headers[key]).trim()}\n`)
+    .join("");
+  const canonicalQuery = canonicalizeQuery(params);
+  const canonicalRequest = ["GET", "/", canonicalQuery, canonicalHeaders, signedHeaders, contentHash].join("\n");
+  const stringToSign = `ACS3-HMAC-SHA256\n${sha256Hex(canonicalRequest)}`;
+  const signature = crypto.createHmac("sha256", accessKeySecret).update(stringToSign, "utf8").digest("hex");
+  headers.authorization = `ACS3-HMAC-SHA256 Credential=${accessKeyId},SignedHeaders=${signedHeaders},Signature=${signature}`;
+
+  const response = await fetch(`https://${endpoint}/?${canonicalQuery}`, { headers });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) throw new HttpError(response.status, data.Message || "阿里云短信接口请求失败。");
+  return data;
+}
+
+function canonicalizeQuery(params) {
+  return Object.keys(params)
+    .sort()
+    .map((key) => `${encodeRfc3986(key)}=${encodeRfc3986(params[key])}`)
+    .join("&");
+}
+
+function encodeRfc3986(value) {
+  return encodeURIComponent(String(value))
+    .replace(/[!'()*]/g, (char) => `%${char.charCodeAt(0).toString(16).toUpperCase()}`);
+}
+
+function sha256Hex(value) {
+  return crypto.createHash("sha256").update(value, "utf8").digest("hex");
 }
 
 function verifyAlipay(params) {
