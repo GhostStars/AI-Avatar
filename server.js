@@ -294,6 +294,7 @@ async function handleAuthCode(req, res) {
     expiresAt: new Date(Date.now() + smsCodeTtlMs).toISOString(),
     provider: smsResult.provider,
     bizId: smsResult.bizId || "",
+    outId: smsResult.outId || "",
   };
   db.smsCodes.push(record);
   writeDb(db);
@@ -321,11 +322,16 @@ function assertSmsRateLimit(db, phone) {
   }
 }
 
-function verifySmsCode(db, phone, code) {
+async function verifySmsCode(db, phone, code) {
   const record = [...db.smsCodes]
     .reverse()
-    .find((item) => item.phone === phone && item.code === String(code || "") && !item.used && new Date(item.expiresAt) > new Date());
+    .find((item) => item.phone === phone && !item.used && new Date(item.expiresAt) > new Date());
   if (!record) throw new HttpError(400, "验证码错误或已过期。");
+  if (record.provider === "dypns") {
+    await checkDypnsSmsCode(phone, code, record);
+  } else if (record.code !== String(code || "")) {
+    throw new HttpError(400, "验证码错误或已过期。");
+  }
   record.used = true;
   record.usedAt = now();
 }
@@ -334,6 +340,7 @@ async function sendSmsCode(phone, code, purpose) {
   const provider = (process.env.SMS_PROVIDER || "mock").toLowerCase();
   if (provider === "mock") return { provider: "mock" };
   if (provider === "aliyun") return sendAliyunSmsCode(phone, code, purpose);
+  if (provider === "dypns") return sendDypnsSmsCode(phone, purpose);
   throw new HttpError(400, `未知短信服务商：${provider}`);
 }
 
@@ -369,11 +376,80 @@ async function sendAliyunSmsCode(phone, code, purpose) {
   return { provider: "aliyun", bizId: result.BizId };
 }
 
+async function sendDypnsSmsCode(phone, purpose) {
+  const accessKeyId = process.env.ALIYUN_DYPNS_ACCESS_KEY_ID || process.env.ALIYUN_SMS_ACCESS_KEY_ID;
+  const accessKeySecret = process.env.ALIYUN_DYPNS_ACCESS_KEY_SECRET || process.env.ALIYUN_SMS_ACCESS_KEY_SECRET;
+  const signName = process.env.ALIYUN_DYPNS_SIGN_NAME || process.env.ALIYUN_SMS_SIGN_NAME;
+  const templateCode = purpose === "set_password" && process.env.ALIYUN_DYPNS_SET_PASSWORD_TEMPLATE_CODE
+    ? process.env.ALIYUN_DYPNS_SET_PASSWORD_TEMPLATE_CODE
+    : (process.env.ALIYUN_DYPNS_TEMPLATE_CODE || process.env.ALIYUN_SMS_TEMPLATE_CODE || "100001");
+  if (!accessKeyId || !accessKeySecret || !signName || !templateCode) {
+    throw new HttpError(400, "阿里云号码认证配置缺失。需要 AccessKey、赠送签名、赠送模板 Code。");
+  }
+
+  const outId = id("smsout");
+  const params = {
+    CountryCode: "86",
+    PhoneNumber: phone,
+    SignName: signName,
+    TemplateCode: templateCode,
+    TemplateParam: process.env.ALIYUN_DYPNS_TEMPLATE_PARAM || JSON.stringify({ code: "##code##" }),
+  };
+  if (process.env.ALIYUN_DYPNS_USE_OUT_ID === "true") params.OutId = outId;
+  if (process.env.ALIYUN_DYPNS_CODE_LENGTH) params.CodeLength = Number(process.env.ALIYUN_DYPNS_CODE_LENGTH);
+  if (process.env.ALIYUN_DYPNS_VALID_TIME) params.ValidTime = Number(process.env.ALIYUN_DYPNS_VALID_TIME);
+  if (process.env.ALIYUN_DYPNS_DUPLICATE_POLICY) params.DuplicatePolicy = Number(process.env.ALIYUN_DYPNS_DUPLICATE_POLICY);
+  if (process.env.ALIYUN_DYPNS_INTERVAL) params.Interval = Number(process.env.ALIYUN_DYPNS_INTERVAL);
+  if (process.env.ALIYUN_DYPNS_CODE_TYPE) params.CodeType = Number(process.env.ALIYUN_DYPNS_CODE_TYPE);
+  if (process.env.ALIYUN_DYPNS_RETURN_VERIFY_CODE) params.ReturnVerifyCode = process.env.ALIYUN_DYPNS_RETURN_VERIFY_CODE === "true";
+  if (process.env.ALIYUN_DYPNS_AUTO_RETRY) params.AutoRetry = Number(process.env.ALIYUN_DYPNS_AUTO_RETRY);
+  if (process.env.ALIYUN_DYPNS_SCHEME_NAME) params.SchemeName = process.env.ALIYUN_DYPNS_SCHEME_NAME;
+
+  const result = await aliyunOpenApiRequest({
+    endpoint: process.env.ALIYUN_DYPNS_ENDPOINT || "dypnsapi.aliyuncs.com",
+    action: "SendSmsVerifyCode",
+    version: "2017-05-25",
+    params,
+    accessKeyId,
+    accessKeySecret,
+  });
+  if (result.Code !== "OK" || result.Success === false) {
+    throw new HttpError(502, result.Message || `阿里云号码认证短信发送失败：${result.Code || "Unknown"}`);
+  }
+  return { provider: "dypns", bizId: result.Model?.BizId || "", outId: params.OutId || "" };
+}
+
+async function checkDypnsSmsCode(phone, code, record) {
+  const accessKeyId = process.env.ALIYUN_DYPNS_ACCESS_KEY_ID || process.env.ALIYUN_SMS_ACCESS_KEY_ID;
+  const accessKeySecret = process.env.ALIYUN_DYPNS_ACCESS_KEY_SECRET || process.env.ALIYUN_SMS_ACCESS_KEY_SECRET;
+  if (!accessKeyId || !accessKeySecret) throw new HttpError(400, "阿里云号码认证 AccessKey 配置缺失。");
+  const params = {
+    CountryCode: "86",
+    PhoneNumber: phone,
+    VerifyCode: String(code || ""),
+    CaseAuthPolicy: 1,
+  };
+  if (record.outId) params.OutId = record.outId;
+  if (process.env.ALIYUN_DYPNS_SCHEME_NAME) params.SchemeName = process.env.ALIYUN_DYPNS_SCHEME_NAME;
+
+  const result = await aliyunOpenApiRequest({
+    endpoint: process.env.ALIYUN_DYPNS_ENDPOINT || "dypnsapi.aliyuncs.com",
+    action: "CheckSmsVerifyCode",
+    version: "2017-05-25",
+    params,
+    accessKeyId,
+    accessKeySecret,
+  });
+  if (result.Code !== "OK" || result.Model?.VerifyResult !== "PASS") {
+    throw new HttpError(400, "验证码错误或已过期。");
+  }
+}
+
 async function handleLoginCode(req, res) {
   const body = await readJson(req);
   const phone = assertPhone(body.phone);
   const db = readDb();
-  verifySmsCode(db, phone, body.code);
+  await verifySmsCode(db, phone, body.code);
   const user = findOrCreateUser(db, phone);
   user.updatedAt = now();
   const sid = createSession(db, user.id);
@@ -400,7 +476,7 @@ async function handleSetPassword(req, res) {
   const body = await readJson(req);
   const phone = assertPhone(body.phone);
   const db = readDb();
-  verifySmsCode(db, phone, body.code);
+  await verifySmsCode(db, phone, body.code);
   const user = findOrCreateUser(db, phone);
   user.passwordHash = hashPassword(body.password);
   user.updatedAt = now();
