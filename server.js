@@ -337,11 +337,17 @@ async function verifySmsCode(db, phone, code) {
 }
 
 async function sendSmsCode(phone, code, purpose) {
-  const provider = (process.env.SMS_PROVIDER || "mock").toLowerCase();
+  const provider = smsProvider();
   if (provider === "mock") return { provider: "mock" };
   if (provider === "aliyun") return sendAliyunSmsCode(phone, code, purpose);
   if (provider === "dypns") return sendDypnsSmsCode(phone, purpose);
   throw new HttpError(400, `未知短信服务商：${provider}`);
+}
+
+function smsProvider() {
+  if (process.env.SMS_PROVIDER) return process.env.SMS_PROVIDER.toLowerCase();
+  if (process.env.RAILWAY_ENVIRONMENT || process.env.RAILWAY_SERVICE_ID || process.env.NODE_ENV === "production") return "dypns";
+  return "mock";
 }
 
 async function sendAliyunSmsCode(phone, code, purpose) {
