@@ -389,11 +389,12 @@ async function sendDypnsSmsCode(phone, purpose) {
 
   const outId = id("smsout");
   const params = {
+    RegionId: process.env.ALIYUN_DYPNS_REGION_ID || "ap-southeast-1",
     CountryCode: "86",
     PhoneNumber: phone,
     SignName: signName,
     TemplateCode: templateCode,
-    TemplateParam: process.env.ALIYUN_DYPNS_TEMPLATE_PARAM || JSON.stringify({ code: "##code##" }),
+    TemplateParam: process.env.ALIYUN_DYPNS_TEMPLATE_PARAM || JSON.stringify({ code: "##code##", min: "5" }),
   };
   if (process.env.ALIYUN_DYPNS_USE_OUT_ID === "true") params.OutId = outId;
   if (process.env.ALIYUN_DYPNS_CODE_LENGTH) params.CodeLength = Number(process.env.ALIYUN_DYPNS_CODE_LENGTH);
@@ -424,6 +425,7 @@ async function checkDypnsSmsCode(phone, code, record) {
   const accessKeySecret = process.env.ALIYUN_DYPNS_ACCESS_KEY_SECRET || process.env.ALIYUN_SMS_ACCESS_KEY_SECRET;
   if (!accessKeyId || !accessKeySecret) throw new HttpError(400, "阿里云号码认证 AccessKey 配置缺失。");
   const params = {
+    RegionId: process.env.ALIYUN_DYPNS_REGION_ID || "ap-southeast-1",
     CountryCode: "86",
     PhoneNumber: phone,
     VerifyCode: String(code || ""),
