@@ -24,6 +24,7 @@ const pointPackages = {
   points_69: { amount: 690, points: 20, name: "体验包" },
   points_199: { amount: 1990, points: 80, name: "标准包" },
   points_399: { amount: 3990, points: 200, name: "高级包" },
+  points_test_10: { amount: 10, points: 1, name: "测试包" },
 };
 
 const smsCodeTtlMs = Number(process.env.SMS_CODE_TTL_SECONDS || 600) * 1000;
@@ -83,6 +84,10 @@ const server = http.createServer(async (req, res) => {
     }
     if (req.method === "POST" && req.url === "/api/payment/alipay/sync") {
       await handleAlipaySync(req, res);
+      return;
+    }
+    if ((req.method === "GET" || req.method === "POST") && url.pathname === "/api/test/grant-points") {
+      await handleTestGrantPoints(req, res, url);
       return;
     }
     if (req.method === "POST" && req.url === "/api/generate/text-avatar") {
@@ -492,6 +497,11 @@ function allowMockPay() {
   return !isProductionRuntime();
 }
 
+function allowTestPackage() {
+  if (process.env.ENABLE_TEST_PACKAGE === "true") return true;
+  return !isProductionRuntime();
+}
+
 async function sendAliyunSmsCode(phone, code, purpose) {
   const accessKeyId = process.env.ALIYUN_SMS_ACCESS_KEY_ID;
   const accessKeySecret = process.env.ALIYUN_SMS_ACCESS_KEY_SECRET;
@@ -652,6 +662,7 @@ async function handleMockPay(req, res) {
   const body = await readJson(req);
   const pkg = pointPackages[body.packageId];
   if (!pkg) throw new HttpError(400, "未知点数套餐。");
+  if (body.packageId === "points_test_10" && !allowTestPackage()) throw new HttpError(403, "测试包未开启。");
   const db = readDb();
   const user = getSessionUser(req, db);
   if (!user) throw new HttpError(401, "充值前请先登录。");
@@ -686,10 +697,35 @@ async function handleMockPay(req, res) {
   sendJson(res, 200, mePayload(db, user));
 }
 
+async function handleTestGrantPoints(req, res, url) {
+  const token = req.method === "GET" ? url.searchParams.get("token") : (await readJson(req)).token;
+  if (!process.env.TEST_GRANT_TOKEN) throw new HttpError(403, "免费测试加点未配置。");
+  if (!token || token !== process.env.TEST_GRANT_TOKEN) throw new HttpError(403, "免费测试加点 token 错误。");
+
+  const points = Math.max(1, Math.min(50, Number(url.searchParams.get("points") || 10)));
+  const db = readDb();
+  const user = getSessionUser(req, db);
+  if (!user) throw new HttpError(401, "请先登录后再领取测试点数。");
+  const account = accountFor(db, user.id);
+  account.balance += points;
+  account.updatedAt = now();
+  db.pointTransactions.unshift({
+    id: id("pt"),
+    userId: user.id,
+    type: "test_grant",
+    points,
+    description: `测试加点：${points} 点`,
+    createdAt: now(),
+  });
+  writeDb(db);
+  sendJson(res, 200, mePayload(db, user));
+}
+
 async function handleAlipayCreate(req, res) {
   const body = await readJson(req);
   const pkg = pointPackages[body.packageId];
   if (!pkg) throw new HttpError(400, "未知点数套餐。");
+  if (body.packageId === "points_test_10" && !allowTestPackage()) throw new HttpError(403, "测试包未开启。");
   assertAlipayConfig();
 
   const db = readDb();
@@ -844,6 +880,7 @@ function packageByAmount(totalAmount) {
   const cents = Math.round(Number(totalAmount) * 100);
   const entry = Object.entries(pointPackages).find(([, pkg]) => pkg.amount === cents);
   if (!entry) return null;
+  if (entry[0] === "points_test_10" && !allowTestPackage()) return null;
   return { id: entry[0], ...entry[1] };
 }
 

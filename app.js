@@ -26,6 +26,7 @@ const COST = {
 };
 
 const PACKAGES = [
+  { id: "points_test_10", name: "支付测试包", price: "¥0.1", amount: 10, points: 1, testOnly: true },
   { id: "points_69", name: "体验包", price: "¥6.9", amount: 690, points: 20 },
   { id: "points_199", name: "标准包", price: "¥19.9", amount: 1990, points: 80, recommended: true },
   { id: "points_399", name: "高级包", price: "¥39.9", amount: 3990, points: 200 },
@@ -724,13 +725,14 @@ function resultPage(taskId) {
 
 function rechargePage() {
   track("recharge_page_view");
+  const packages = paymentPackages();
   layout(`
     <section class="section">
       <p class="eyebrow">充值点数</p>
       <h2>点数可用于生成头像、动态头像和高清下载</h2>
       ${serverMe?.user ? "" : '<p class="notice">充值前需要登录手机号账户，点数会绑定到你的账户。</p>'}
       <div class="grid three">
-        ${PACKAGES.map(
+        ${packages.map(
           (pkg) => `
           <article class="card">
             ${pkg.recommended ? '<span class="tag">推荐</span>' : ""}
@@ -777,6 +779,12 @@ function rechargePage() {
       requireLogin("充值前请先登录手机号账户。");
     });
   });
+}
+
+function paymentPackages() {
+  const params = new URLSearchParams(location.search);
+  const showTestPay = params.get("testPay") === "1" || isLocalDevelopment();
+  return PACKAGES.filter((pkg) => !pkg.testOnly || showTestPay);
 }
 
 function isLocalDevelopment() {
