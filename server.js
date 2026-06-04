@@ -41,7 +41,7 @@ const server = http.createServer(async (req, res) => {
   try {
     const url = new URL(req.url, "http://127.0.0.1");
     if (req.method === "GET" && req.url === "/health") {
-      sendJson(res, 200, { status: "ok" });
+      sendJson(res, 200, { status: "ok", storage: storage.driver });
       return;
     }
     if (req.method === "GET" && req.url === "/api/me") {
