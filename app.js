@@ -49,6 +49,9 @@ const motions = [
 
 let state;
 let serverMe = null;
+let adConfig = { provider: "none", slots: {} };
+let tencentAdScriptLoading = null;
+const renderedAdSlots = new Set();
 let authMode = "code";
 let formState = {
   style: "不限",
@@ -93,6 +96,16 @@ async function refreshMe() {
     serverMe = null;
     return null;
   }
+}
+
+async function refreshAdConfig() {
+  if (location.protocol === "file:") return adConfig;
+  try {
+    adConfig = await api("/api/ad-config");
+  } catch {
+    adConfig = { provider: "none", slots: {} };
+  }
+  return adConfig;
 }
 
 async function syncPaymentReturn() {
@@ -213,13 +226,63 @@ function showLoginModal(message) {
 
 function adSlot(id) {
   const slot = AD_SLOTS.find((item) => item.id === id) || AD_SLOTS[0];
+  const config = adConfig?.slots?.[slot.id];
+  const isLive = adConfig?.provider !== "none" && config?.enabled;
   return `
-    <aside class="ad-slot" data-ad-slot="${slot.id}">
-      <span>广告位</span>
+    <aside class="ad-slot ${isLive ? "ad-slot-live" : ""}" data-ad-slot="${slot.id}">
+      <span>${isLive ? "广告" : "广告位"}</span>
       <strong>${slot.label}</strong>
       <small>${slot.providers}</small>
+      <div class="ad-container" id="ad_${slot.id}"></div>
     </aside>
   `;
+}
+
+function renderLiveAds() {
+  if (!adConfig || adConfig.provider === "none") return;
+  if (adConfig.provider === "tencent") renderTencentAds();
+}
+
+function loadTencentAdScript() {
+  if (window.TencentGDT?.NATIVE) return Promise.resolve();
+  if (tencentAdScriptLoading) return tencentAdScriptLoading;
+  window.TencentGDT = window.TencentGDT || [];
+  tencentAdScriptLoading = new Promise((resolve, reject) => {
+    const script = document.createElement("script");
+    script.async = true;
+    script.src = "https://qzs.gdtimg.com/union/res/union_sdk/page/h5_sdk/i.js";
+    script.onload = resolve;
+    script.onerror = reject;
+    document.head.insertBefore(script, document.head.firstChild);
+  });
+  return tencentAdScriptLoading;
+}
+
+function renderTencentAds() {
+  const appId = adConfig.tencentAppId;
+  if (!appId) return;
+  window.TencentGDT = window.TencentGDT || [];
+  Object.values(adConfig.slots || {}).forEach((slot) => {
+    if (!slot.enabled || !slot.placementId) return;
+    const containerId = `ad_${slot.slotId}`;
+    if (!document.querySelector(`#${containerId}`)) return;
+    const renderKey = `${containerId}:${slot.placementId}`;
+    if (renderedAdSlots.has(renderKey)) return;
+    renderedAdSlots.add(renderKey);
+    window.TencentGDT.push({
+      app_id: appId,
+      placement_id: slot.placementId,
+      type: slot.type || "native",
+      display_type: slot.displayType || "banner",
+      containerid: containerId,
+      count: 1,
+      onComplete(res) {
+        if (res && res.ret === 0) return;
+        console.warn("Tencent ad load failed", slot.slotId, res);
+      },
+    });
+  });
+  loadTencentAdScript().catch(() => console.warn("Tencent ad script failed"));
 }
 
 function now() {
@@ -400,6 +463,7 @@ function layout(content) {
   document.querySelectorAll("[data-track]").forEach((node) => {
     node.addEventListener("click", () => track(node.dataset.track));
   });
+  setTimeout(renderLiveAds, 0);
 }
 
 function displayBalance() {
@@ -1042,6 +1106,7 @@ function toast(message) {
 async function render() {
   state = loadState();
   await refreshMe();
+  await refreshAdConfig();
   if (location.search.includes("trade_no") || location.search.includes("out_trade_no")) {
     await syncPaymentReturn().catch(() => {});
   }

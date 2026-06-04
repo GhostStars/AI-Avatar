@@ -563,6 +563,19 @@ textarea {
   font-size: 12px;
 }
 
+.ad-slot-live {
+  border-style: solid;
+  background: rgba(255, 255, 255, 0.76);
+}
+
+.ad-container {
+  min-height: 1px;
+}
+
+.ad-slot-live .ad-container {
+  min-height: 72px;
+}
+
 .ad-band {
   max-width: 1180px;
   margin: 24px auto 0;

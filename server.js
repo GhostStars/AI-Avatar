@@ -49,6 +49,10 @@ const server = http.createServer(async (req, res) => {
       handleMe(req, res);
       return;
     }
+    if (req.method === "GET" && req.url === "/api/ad-config") {
+      handleAdConfig(req, res);
+      return;
+    }
     if (req.method === "POST" && req.url === "/api/auth/code") {
       await handleAuthCode(req, res);
       return;
@@ -412,6 +416,33 @@ function handleMe(req, res) {
   const db = readDb();
   const user = getSessionUser(req, db);
   sendJson(res, 200, mePayload(db, user));
+}
+
+function handleAdConfig(req, res) {
+  const provider = (process.env.AD_PROVIDER || "none").toLowerCase();
+  if (provider !== "tencent") {
+    sendJson(res, 200, { provider: "none", slots: {} });
+    return;
+  }
+  sendJson(res, 200, {
+    provider: "tencent",
+    tencentAppId: process.env.TENCENT_AD_APP_ID || "",
+    slots: {
+      home_mid: adSlotConfig("home_mid", process.env.TENCENT_AD_HOME_MID_PLACEMENT_ID, "banner"),
+      tool_side: adSlotConfig("tool_side", process.env.TENCENT_AD_TOOL_SIDE_PLACEMENT_ID, "banner"),
+      result_bottom: adSlotConfig("result_bottom", process.env.TENCENT_AD_RESULT_BOTTOM_PLACEMENT_ID, "banner"),
+    },
+  });
+}
+
+function adSlotConfig(slotId, placementId, displayType) {
+  return {
+    slotId,
+    placementId: placementId || "",
+    type: "native",
+    displayType,
+    enabled: Boolean(placementId),
+  };
 }
 
 async function handleAuthCode(req, res) {
