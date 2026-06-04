@@ -10,6 +10,7 @@ const port = Number(process.env.PORT || 4173);
 const host = process.env.HOST || "0.0.0.0";
 
 loadDotEnv();
+const storage = createStorage();
 
 const mime = {
   ".html": "text/html; charset=utf-8",
@@ -123,7 +124,134 @@ function defaultDb() {
   };
 }
 
+function createStorage() {
+  const sqlitePath = process.env.SQLITE_PATH || (process.env.DATABASE_URL?.startsWith("sqlite:") ? process.env.DATABASE_URL.replace(/^sqlite:/, "") : "");
+  if (!sqlitePath) return { driver: "json" };
+  let Database;
+  try {
+    Database = require("better-sqlite3");
+  } catch (error) {
+    throw new Error("已配置 SQLITE_PATH，但 better-sqlite3 未安装。请重新部署安装依赖。");
+  }
+  const resolvedPath = path.resolve(root, sqlitePath);
+  fs.mkdirSync(path.dirname(resolvedPath), { recursive: true });
+  const db = new Database(resolvedPath);
+  db.pragma("journal_mode = WAL");
+  db.pragma("foreign_keys = ON");
+  migrateSqlite(db);
+  seedSqliteFromJson(db);
+  return { driver: "sqlite", db, path: resolvedPath };
+}
+
+function migrateSqlite(db) {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS users (
+      id TEXT PRIMARY KEY,
+      phone TEXT NOT NULL UNIQUE,
+      passwordHash TEXT,
+      createdAt TEXT NOT NULL,
+      updatedAt TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS point_accounts (
+      id TEXT PRIMARY KEY,
+      userId TEXT NOT NULL UNIQUE,
+      balance INTEGER NOT NULL DEFAULT 0,
+      totalRecharged INTEGER NOT NULL DEFAULT 0,
+      totalConsumed INTEGER NOT NULL DEFAULT 0,
+      createdAt TEXT NOT NULL,
+      updatedAt TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS point_transactions (
+      id TEXT PRIMARY KEY,
+      userId TEXT NOT NULL,
+      type TEXT NOT NULL,
+      points INTEGER NOT NULL,
+      relatedOrderId TEXT,
+      relatedTaskId TEXT,
+      description TEXT NOT NULL,
+      createdAt TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS orders (
+      id TEXT PRIMARY KEY,
+      userId TEXT NOT NULL,
+      packageId TEXT NOT NULL,
+      amount INTEGER NOT NULL,
+      points INTEGER NOT NULL,
+      status TEXT NOT NULL,
+      paymentProvider TEXT NOT NULL,
+      paymentTradeNo TEXT,
+      recovered INTEGER NOT NULL DEFAULT 0,
+      createdAt TEXT NOT NULL,
+      paidAt TEXT,
+      updatedAt TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS sessions (
+      id TEXT PRIMARY KEY,
+      userId TEXT NOT NULL,
+      createdAt TEXT NOT NULL,
+      expiresAt TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS sms_codes (
+      id TEXT PRIMARY KEY,
+      phone TEXT NOT NULL,
+      code TEXT NOT NULL,
+      purpose TEXT NOT NULL,
+      used INTEGER NOT NULL DEFAULT 0,
+      createdAt TEXT NOT NULL,
+      expiresAt TEXT NOT NULL,
+      usedAt TEXT,
+      provider TEXT,
+      bizId TEXT,
+      outId TEXT
+    );
+  `);
+}
+
+function readSqliteDb() {
+  const db = storage.db;
+  return {
+    users: db.prepare("SELECT * FROM users ORDER BY createdAt ASC").all(),
+    pointAccounts: db.prepare("SELECT id, userId, balance, totalRecharged, totalConsumed, createdAt, updatedAt FROM point_accounts").all(),
+    pointTransactions: db.prepare("SELECT * FROM point_transactions ORDER BY createdAt DESC").all(),
+    orders: db.prepare("SELECT id, userId, packageId, amount, points, status, paymentProvider, paymentTradeNo, createdAt, paidAt, updatedAt, recovered FROM orders ORDER BY createdAt DESC").all().map((order) => ({ ...order, recovered: Boolean(order.recovered) })),
+    sessions: db.prepare("SELECT * FROM sessions").all(),
+    smsCodes: db.prepare("SELECT id, phone, code, purpose, used, createdAt, expiresAt, usedAt, provider, bizId, outId FROM sms_codes").all().map((item) => ({ ...item, used: Boolean(item.used) })),
+  };
+}
+
+function writeSqliteDb(dbData) {
+  replaceSqliteDb(storage.db, dbData);
+}
+
+function seedSqliteFromJson(db) {
+  const userCount = db.prepare("SELECT COUNT(*) AS count FROM users").get().count;
+  if (userCount || !fs.existsSync(dbPath)) return;
+  const data = JSON.parse(fs.readFileSync(dbPath, "utf8"));
+  replaceSqliteDb(db, { ...defaultDb(), ...data });
+}
+
+function replaceSqliteDb(db, dbData) {
+  const transaction = db.transaction((data) => {
+    db.exec("DELETE FROM sms_codes; DELETE FROM sessions; DELETE FROM orders; DELETE FROM point_transactions; DELETE FROM point_accounts; DELETE FROM users;");
+    const insertUser = db.prepare("INSERT INTO users (id, phone, passwordHash, createdAt, updatedAt) VALUES (@id, @phone, @passwordHash, @createdAt, @updatedAt)");
+    const insertAccount = db.prepare("INSERT INTO point_accounts (id, userId, balance, totalRecharged, totalConsumed, createdAt, updatedAt) VALUES (@id, @userId, @balance, @totalRecharged, @totalConsumed, @createdAt, @updatedAt)");
+    const insertTransaction = db.prepare("INSERT INTO point_transactions (id, userId, type, points, relatedOrderId, relatedTaskId, description, createdAt) VALUES (@id, @userId, @type, @points, @relatedOrderId, @relatedTaskId, @description, @createdAt)");
+    const insertOrder = db.prepare("INSERT INTO orders (id, userId, packageId, amount, points, status, paymentProvider, paymentTradeNo, recovered, createdAt, paidAt, updatedAt) VALUES (@id, @userId, @packageId, @amount, @points, @status, @paymentProvider, @paymentTradeNo, @recovered, @createdAt, @paidAt, @updatedAt)");
+    const insertSession = db.prepare("INSERT INTO sessions (id, userId, createdAt, expiresAt) VALUES (@id, @userId, @createdAt, @expiresAt)");
+    const insertSms = db.prepare("INSERT INTO sms_codes (id, phone, code, purpose, used, createdAt, expiresAt, usedAt, provider, bizId, outId) VALUES (@id, @phone, @code, @purpose, @used, @createdAt, @expiresAt, @usedAt, @provider, @bizId, @outId)");
+
+    for (const user of data.users || []) insertUser.run({ passwordHash: null, updatedAt: user.createdAt || now(), ...user });
+    for (const account of data.pointAccounts || []) insertAccount.run(account);
+    for (const item of data.pointTransactions || []) insertTransaction.run({ relatedOrderId: null, relatedTaskId: null, ...item });
+    for (const order of data.orders || []) insertOrder.run({ paymentTradeNo: null, paidAt: null, ...order, recovered: order.recovered ? 1 : 0 });
+    for (const session of data.sessions || []) insertSession.run(session);
+    for (const item of data.smsCodes || []) insertSms.run({ usedAt: null, provider: null, bizId: null, outId: null, ...item, used: item.used ? 1 : 0 });
+  });
+  transaction({ ...defaultDb(), ...dbData });
+}
+
 function readDb() {
+  if (storage.driver === "sqlite") return readSqliteDb();
   if (!fs.existsSync(dataDir)) fs.mkdirSync(dataDir, { recursive: true });
   if (!fs.existsSync(dbPath)) {
     const fresh = defaultDb();
@@ -134,6 +262,10 @@ function readDb() {
 }
 
 function writeDb(db) {
+  if (storage.driver === "sqlite") {
+    writeSqliteDb(db);
+    return;
+  }
   if (!fs.existsSync(dataDir)) fs.mkdirSync(dataDir, { recursive: true });
   fs.writeFileSync(dbPath, JSON.stringify(db, null, 2));
 }
