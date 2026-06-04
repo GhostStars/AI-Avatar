@@ -69,6 +69,7 @@ const server = http.createServer(async (req, res) => {
       return;
     }
     if (req.method === "POST" && req.url === "/api/payment/mock-pay") {
+      if (!allowMockPay()) throw new HttpError(403, "模拟支付仅允许本地开发使用。");
       await handleMockPay(req, res);
       return;
     }
@@ -478,8 +479,17 @@ async function sendSmsCode(phone, code, purpose) {
 
 function smsProvider() {
   if (process.env.SMS_PROVIDER) return process.env.SMS_PROVIDER.toLowerCase();
-  if (process.env.RAILWAY_ENVIRONMENT || process.env.RAILWAY_SERVICE_ID || process.env.NODE_ENV === "production") return "dypns";
+  if (isProductionRuntime()) return "dypns";
   return "mock";
+}
+
+function isProductionRuntime() {
+  return Boolean(process.env.RAILWAY_ENVIRONMENT || process.env.RAILWAY_SERVICE_ID || process.env.NODE_ENV === "production");
+}
+
+function allowMockPay() {
+  if (process.env.ENABLE_MOCK_PAY === "true") return true;
+  return !isProductionRuntime();
 }
 
 async function sendAliyunSmsCode(phone, code, purpose) {

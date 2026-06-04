@@ -759,7 +759,7 @@ function rechargePage() {
           track("payment_start", { packageId: pkg.id, orderId: data.orderId });
           openPaymentForm(data.paymentForm);
         } catch (error) {
-          if (error.message.includes("支付宝配置缺失")) {
+          if (error.message.includes("支付宝配置缺失") && isLocalDevelopment()) {
             serverMe = await api("/api/payment/mock-pay", {
               method: "POST",
               body: JSON.stringify({ packageId: pkg.id }),
@@ -777,6 +777,10 @@ function rechargePage() {
       requireLogin("充值前请先登录手机号账户。");
     });
   });
+}
+
+function isLocalDevelopment() {
+  return ["localhost", "127.0.0.1", ""].includes(location.hostname);
 }
 
 function openPaymentForm(html) {
