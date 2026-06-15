@@ -581,6 +581,18 @@ textarea {
   margin: 24px auto 0;
 }
 
+.admin-login {
+  margin-top: 18px;
+}
+
+.admin-stats {
+  margin-top: 22px;
+}
+
+.admin-section {
+  margin-top: 22px;
+}
+
 .loading-overlay {
   position: fixed;
   inset: 0;

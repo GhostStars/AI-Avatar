@@ -52,6 +52,7 @@ let serverMe = null;
 let adConfig = { provider: "none", slots: {} };
 let tencentAdScriptLoading = null;
 const renderedAdSlots = new Set();
+let adminState = null;
 let authMode = "code";
 let formState = {
   style: "不限",
@@ -106,6 +107,17 @@ async function refreshAdConfig() {
     adConfig = { provider: "none", slots: {} };
   }
   return adConfig;
+}
+
+async function adminApi(path, options = {}) {
+  const token = sessionStorage.getItem("admin-token") || "";
+  return api(path, {
+    ...options,
+    headers: {
+      "x-admin-token": token,
+      ...(options.headers || {}),
+    },
+  });
 }
 
 async function syncPaymentReturn() {
@@ -794,15 +806,18 @@ function rechargePage() {
     <section class="section">
       <p class="eyebrow">充值点数</p>
       <h2>点数可用于生成头像、动态头像和高清下载</h2>
-      ${serverMe?.user ? "" : '<p class="notice">充值前需要登录手机号账户，点数会绑定到你的账户。</p>'}
+      ${serverMe?.user ? `<p class="notice">当前余额 ${serverMe.balance} 点。支付成功后会自动到账，可在“我的点数”查看流水。</p>` : '<p class="notice">充值前需要登录手机号账户，点数会绑定到你的账户。先登录，再支付。</p><div class="actions"><a class="primary" href="#/login">登录 / 注册</a></div>'}
       <div class="grid three">
         ${packages.map(
           (pkg) => `
-          <article class="card">
-            ${pkg.recommended ? '<span class="tag">推荐</span>' : ""}
+          <article class="card package-card">
+            ${pkg.recommended ? '<span class="tag">最划算</span>' : ""}
+            ${pkg.testOnly ? '<span class="tag">测试</span>' : ""}
             <h3>${pkg.name}</h3>
             <h2>${pkg.price}</h2>
             <p class="lead">${pkg.points} 点</p>
+            <p class="muted">${packageValueCopy(pkg)}</p>
+            <p class="notice compact">${packageUnitCopy(pkg)}</p>
             <button class="primary" data-package="${pkg.id}">立即支付</button>
           </article>
         `,
@@ -847,8 +862,19 @@ function rechargePage() {
 
 function paymentPackages() {
   const params = new URLSearchParams(location.search);
-  const showTestPay = params.get("testPay") === "1" || isLocalDevelopment();
+  const hashQuery = location.hash.includes("?") ? location.hash.slice(location.hash.indexOf("?") + 1) : "";
+  const hashParams = new URLSearchParams(hashQuery);
+  const showTestPay = params.get("testPay") === "1" || hashParams.get("testPay") === "1" || isLocalDevelopment();
   return PACKAGES.filter((pkg) => !pkg.testOnly || showTestPay);
+}
+
+function packageValueCopy(pkg) {
+  if (pkg.testOnly) return "只用于真实支付链路测试。";
+  return `约可生成 ${Math.floor(pkg.points / COST.text)} 次头像，或高清下载 ${pkg.points} 张。`;
+}
+
+function packageUnitCopy(pkg) {
+  return `约 ¥${(pkg.amount / Math.max(1, pkg.points) / 100).toFixed(2)} / 点`;
 }
 
 function isLocalDevelopment() {
@@ -900,6 +926,87 @@ function pointsPage() {
   `);
 }
 
+function adminPage() {
+  const token = sessionStorage.getItem("admin-token") || "";
+  layout(`
+    <section class="section">
+      <p class="eyebrow">运营后台</p>
+      <h2>订单、点数和备份</h2>
+      <div class="card form admin-login">
+        <div class="field">
+          <label for="adminToken">后台 Token</label>
+          <input id="adminToken" type="password" value="${escapeHtml(token)}" placeholder="输入 ADMIN_TOKEN" />
+        </div>
+        <div class="actions">
+          <button class="primary" id="loadAdmin" type="button">加载后台</button>
+          <button class="ghost" id="createBackup" type="button">创建备份</button>
+          <button class="plain" id="clearAdminToken" type="button">清除</button>
+        </div>
+      </div>
+      <div id="adminPanel">${adminState ? adminDashboard(adminState) : '<p class="notice">输入 token 后加载后台数据。</p>'}</div>
+    </section>
+  `);
+  document.querySelector("#loadAdmin").addEventListener("click", loadAdminDashboard);
+  document.querySelector("#createBackup").addEventListener("click", createAdminBackup);
+  document.querySelector("#clearAdminToken").addEventListener("click", () => {
+    sessionStorage.removeItem("admin-token");
+    adminState = null;
+    render();
+  });
+}
+
+function adminDashboard(data) {
+  return `
+    <section class="grid three admin-stats">
+      <div class="card"><p class="eyebrow">用户</p><h2>${data.totals.users}</h2><p class="muted">未消耗点数 ${data.totals.outstandingPoints}</p></div>
+      <div class="card"><p class="eyebrow">订单</p><h2>${data.totals.paidOrders}/${data.totals.orders}</h2><p class="muted">待支付 ${data.totals.pendingOrders}</p></div>
+      <div class="card"><p class="eyebrow">收入</p><h2>¥${data.totals.revenueYuan}</h2><p class="muted">存储 ${data.storage}</p></div>
+    </section>
+    <section class="section admin-section">
+      <h2>最近订单</h2>
+      ${table(["订单", "用户", "金额", "点数", "状态", "时间"], data.recentOrders.map((order) => [order.id.slice(0, 18), order.userId.slice(0, 14), `¥${(order.amount / 100).toFixed(2)}`, order.points, order.status, formatTime(order.createdAt)]))}
+    </section>
+    <section class="section admin-section">
+      <h2>最近用户</h2>
+      ${table(["用户", "手机号", "余额", "密码", "注册时间"], data.recentUsers.map((user) => [user.id.slice(0, 14), user.phone, user.balance, user.hasPassword ? "已设" : "未设", formatTime(user.createdAt)]))}
+    </section>
+    <section class="section admin-section">
+      <h2>最近流水</h2>
+      ${table(["用户", "类型", "点数", "说明", "时间"], data.recentTransactions.map((txn) => [txn.userId.slice(0, 14), txn.type, txn.points, txn.description, formatTime(txn.createdAt)]))}
+    </section>
+    <section class="section admin-section">
+      <h2>备份</h2>
+      ${table(["文件", "大小", "时间"], data.backups.map((backup) => [backup.file, `${Math.ceil(backup.size / 1024)} KB`, formatTime(backup.createdAt)]))}
+    </section>
+  `;
+}
+
+async function loadAdminDashboard() {
+  const token = document.querySelector("#adminToken").value.trim();
+  if (!token) return toast("先填后台 token。");
+  sessionStorage.setItem("admin-token", token);
+  try {
+    adminState = await adminApi("/api/admin/summary");
+    render();
+  } catch (error) {
+    toast(error.message);
+  }
+}
+
+async function createAdminBackup() {
+  const token = document.querySelector("#adminToken").value.trim();
+  if (!token) return toast("先填后台 token。");
+  sessionStorage.setItem("admin-token", token);
+  try {
+    const result = await adminApi("/api/admin/backup", { method: "POST", body: "{}" });
+    adminState = await adminApi("/api/admin/summary");
+    toast(`备份已创建：${result.backup.file}`);
+    render();
+  } catch (error) {
+    toast(error.message);
+  }
+}
+
 function table(headers, rows) {
   if (!rows.length) return `<p class="muted">暂无记录。</p>`;
   return `
@@ -908,6 +1015,14 @@ function table(headers, rows) {
       <tbody>${rows.map((row) => `<tr>${row.map((cell) => `<td>${cell}</td>`).join("")}</tr>`).join("")}</tbody>
     </table>
   `;
+}
+
+function escapeHtml(value) {
+  return String(value || "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
 }
 
 function legalPage() {
@@ -1118,6 +1233,7 @@ async function render() {
   if (route === "recharge") return rechargePage();
   if (route === "points") return pointsPage();
   if (route === "login") return loginPage();
+  if (route === "admin") return adminPage();
   if (route === "legal") return legalPage();
   if (route === "loading") {
     location.hash = "#/";

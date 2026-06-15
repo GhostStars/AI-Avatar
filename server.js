@@ -30,6 +30,8 @@ const pointPackages = {
 const smsCodeTtlMs = Number(process.env.SMS_CODE_TTL_SECONDS || 600) * 1000;
 const smsSendCooldownMs = Number(process.env.SMS_SEND_COOLDOWN_SECONDS || 60) * 1000;
 const smsHourlyLimit = Number(process.env.SMS_HOURLY_LIMIT || 5);
+const backupKeep = Number(process.env.BACKUP_KEEP || 12);
+const backupIntervalMinutes = Number(process.env.BACKUP_INTERVAL_MINUTES || 0);
 
 class HttpError extends Error {
   constructor(status, message) {
@@ -51,6 +53,14 @@ const server = http.createServer(async (req, res) => {
     }
     if (req.method === "GET" && req.url === "/api/ad-config") {
       handleAdConfig(req, res);
+      return;
+    }
+    if (req.method === "GET" && url.pathname === "/api/admin/summary") {
+      handleAdminSummary(req, res, url);
+      return;
+    }
+    if (req.method === "POST" && url.pathname === "/api/admin/backup") {
+      handleAdminBackup(req, res, url);
       return;
     }
     if (req.method === "POST" && req.url === "/api/auth/code") {
@@ -107,6 +117,16 @@ const server = http.createServer(async (req, res) => {
 server.listen(port, host, () => {
   console.log(`AI头像工厂 running at http://${host}:${port}`);
 });
+
+if (backupIntervalMinutes > 0) {
+  setInterval(() => {
+    try {
+      createBackup("scheduled");
+    } catch (error) {
+      console.error("backup failed", error.message);
+    }
+  }, backupIntervalMinutes * 60 * 1000).unref();
+}
 
 function loadDotEnv() {
   const envPath = path.join(root, ".env");
@@ -286,6 +306,112 @@ function now() {
 
 function id(prefix) {
   return `${prefix}_${crypto.randomBytes(8).toString("hex")}`;
+}
+
+function requireAdmin(req, url) {
+  const expected = process.env.ADMIN_TOKEN;
+  if (!expected) throw new HttpError(403, "后台未配置 ADMIN_TOKEN。");
+  const provided = req.headers["x-admin-token"] || "";
+  const left = Buffer.from(String(provided));
+  const right = Buffer.from(String(expected));
+  if (left.length !== right.length || !crypto.timingSafeEqual(left, right)) {
+    throw new HttpError(403, "后台 token 错误。");
+  }
+}
+
+function handleAdminSummary(req, res, url) {
+  requireAdmin(req, url);
+  const db = readDb();
+  const paidOrders = db.orders.filter((order) => order.status === "paid");
+  const pendingOrders = db.orders.filter((order) => order.status === "pending");
+  const totalRevenueCents = paidOrders.reduce((sum, order) => sum + Number(order.amount || 0), 0);
+  const totalBalance = db.pointAccounts.reduce((sum, account) => sum + Number(account.balance || 0), 0);
+  sendJson(res, 200, {
+    storage: storage.driver,
+    totals: {
+      users: db.users.length,
+      orders: db.orders.length,
+      paidOrders: paidOrders.length,
+      pendingOrders: pendingOrders.length,
+      revenueYuan: Number((totalRevenueCents / 100).toFixed(2)),
+      outstandingPoints: totalBalance,
+    },
+    recentUsers: db.users.slice(-20).reverse().map((user) => ({
+      id: user.id,
+      phone: maskPhone(user.phone),
+      hasPassword: Boolean(user.passwordHash),
+      createdAt: user.createdAt,
+      updatedAt: user.updatedAt,
+      balance: db.pointAccounts.find((account) => account.userId === user.id)?.balance || 0,
+    })),
+    recentOrders: db.orders.slice(0, 30).map((order) => ({
+      id: order.id,
+      userId: order.userId,
+      amount: order.amount,
+      points: order.points,
+      status: order.status,
+      provider: order.paymentProvider,
+      tradeNo: order.paymentTradeNo || "",
+      createdAt: order.createdAt,
+      paidAt: order.paidAt || "",
+    })),
+    recentTransactions: db.pointTransactions.slice(0, 30),
+    backups: listBackups(),
+  });
+}
+
+function handleAdminBackup(req, res, url) {
+  requireAdmin(req, url);
+  const backup = createBackup("manual");
+  sendJson(res, 200, { ok: true, backup, backups: listBackups() });
+}
+
+function backupDirectory() {
+  if (process.env.BACKUP_DIR) return path.resolve(root, process.env.BACKUP_DIR);
+  if (storage.driver === "sqlite" && storage.path) return path.join(path.dirname(storage.path), "backups");
+  return path.join(dataDir, "backups");
+}
+
+function createBackup(reason = "manual") {
+  const dir = backupDirectory();
+  fs.mkdirSync(dir, { recursive: true });
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const ext = storage.driver === "sqlite" ? "db" : "json";
+  const file = path.join(dir, `ai-avatar-${reason}-${stamp}.${ext}`);
+  if (storage.driver === "sqlite") {
+    storage.db.exec(`VACUUM INTO ${sqlString(file)}`);
+  } else if (fs.existsSync(dbPath)) {
+    fs.copyFileSync(dbPath, file);
+  } else {
+    fs.writeFileSync(file, JSON.stringify(defaultDb(), null, 2));
+  }
+  pruneBackups(dir);
+  const stat = fs.statSync(file);
+  return { file: path.basename(file), size: stat.size, createdAt: stat.mtime.toISOString() };
+}
+
+function sqlString(value) {
+  return `'${String(value).replace(/'/g, "''")}'`;
+}
+
+function listBackups() {
+  const dir = backupDirectory();
+  if (!fs.existsSync(dir)) return [];
+  return fs
+    .readdirSync(dir)
+    .filter((file) => /^ai-avatar-.*\.(db|json)$/.test(file))
+    .map((file) => {
+      const stat = fs.statSync(path.join(dir, file));
+      return { file, size: stat.size, createdAt: stat.mtime.toISOString() };
+    })
+    .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+}
+
+function pruneBackups(dir) {
+  const backups = listBackups();
+  backups.slice(backupKeep).forEach((backup) => {
+    fs.unlinkSync(path.join(dir, backup.file));
+  });
 }
 
 function normalizePhone(phone) {
